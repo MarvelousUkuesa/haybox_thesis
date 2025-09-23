@@ -11,5 +11,8 @@
     "test:int": "jest --runInBand --testPathPattern=integration",
     "test:bdd": "jest --runInBand --testPathPattern=bdd",
     "test:sec": "npm run test:unit && npm run test:int && npm run test:bdd"
+  },
+  "dependencies": {
+    "typescript": "^5.9.2"
   }
 }
