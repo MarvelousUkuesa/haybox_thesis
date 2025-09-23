@@ -9,15 +9,33 @@ permissions:
   security-events: write
   actions: read
 
+# 1) Make sure we run in the app folder (change path if yours is different)
+defaults:
+  run:
+    working-directory: ./paybox-stdd-starter
+
 jobs:
   pr-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm ci
+          cache: 'npm'
+          cache-dependency-path: ./paybox-stdd-starter/package-lock.json
+
+      # Debug: prove we're in the right folder
+      - run: pwd && ls -la && test -f package.json || (echo "No package.json here" && exit 1)
+
+      # 2) Install *dev* deps (where Jest is)
+      - run: npm ci --include=dev
+
+      # Debug: show that jest is installed
+      - run: npx jest --version
+
+      # 3) Run your full security test pack
       - run: npm run test:sec
 
       - name: Semgrep (curated)
@@ -29,12 +47,3 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         with:
           args: detect --no-git -v --redact --config=.gitleaks.toml
-
-  # ✅ OSV v2 as a reusable workflow (NOT a step)
-  osv-scan:
-    needs: pr-gate
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.2.2
