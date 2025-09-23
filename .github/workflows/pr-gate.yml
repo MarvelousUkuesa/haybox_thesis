@@ -8,39 +8,78 @@ permissions:
   security-events: write
   actions: read
 
-defaults:
-  run:
-    working-directory: ./paybox-stdd-starter  # <-- your app folder
-
 jobs:
   pr-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # 1) Detect where your Node app actually is
+      - name: Find app directory
+        id: find
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            echo "appdir=." >> "$GITHUB_OUTPUT"
+          elif [ -f paybox-stdd-starter/package.json ]; then
+            echo "appdir=paybox-stdd-starter" >> "$GITHUB_OUTPUT"
+          else
+            echo "❌ Could not find package.json at repo root or paybox-stdd-starter/"
+            echo "Repo tree (top 200 lines):"
+            ls -laR | sed -n '1,200p'
+            exit 1
+          fi
+          echo "Using appdir: $(cat "$GITHUB_OUTPUT" | sed -n 's/^appdir=//p')"
+
       - name: Debug layout
         run: |
+          echo "Repo root:"
           pwd
           ls -la
-          test -f package.json || (echo "No package.json here" && exit 1)
+          echo "App dir:"
+          cd "${{ steps.find.outputs.appdir }}"
+          pwd
+          ls -la
 
+      # 2) Setup Node + cache using the discovered lockfile
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          # IMPORTANT: path(s) are relative to the repo root, not the working-directory
-          cache-dependency-path: |
-            paybox-stdd-starter/package-lock.json
+          cache-dependency-path: ${{ steps.find.outputs.appdir }}/package-lock.json
 
-      - run: npm ci --include=dev
-      - run: npx jest --version
-      - run: npm run test:sec
+      # 3) Install dev deps (Jest lives in devDependencies)
+      - name: Install deps
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: npm ci --include=dev
 
+      - name: Show Jest version
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: npx jest --version
+
+      # 4) Run the full security test pack
+      - name: Run tests
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: npm run test:sec
+
+      # 5) Semgrep (config path resolves for root or subdir)
       - name: Semgrep (curated)
         uses: returntocorp/semgrep-action@v1
-        with: { config: ./.semgrep/semgrep.yml }
+        with:
+          config: ${{ steps.find.outputs.appdir }}/.semgrep/semgrep.yml
 
+      # 6) Gitleaks (point to the config where it actually is)
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
         with:
-          args: detect --no-git -v --redact --config=.gitleaks.toml
+          args: detect --no-git -v --redact --config=${{ steps.find.outputs.appdir }}/.gitleaks.toml
+
+  # OSV v2 runs as a reusable workflow (not a step)
+  osv-scan:
+    needs: pr-gate
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.2.2
