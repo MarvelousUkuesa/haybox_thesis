@@ -30,6 +30,11 @@ jobs:
         with:
           args: detect --no-git -v --redact --config=.gitleaks.toml
 
-  # ✅ OSV v2: reusable workflow
+  # ✅ OSV v2 as a reusable workflow (NOT a step)
   osv-scan:
+    needs: pr-gate
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.2.2
