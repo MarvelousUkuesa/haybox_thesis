@@ -1,8 +1,8 @@
 name: Nightly Security
 on:
   schedule:
-    - cron: '0 1 * * *'   # nightly
-  workflow_dispatch:       # allow manual run
+    - cron: '0 1 * * *'
+  workflow_dispatch:
 
 jobs:
   nightly:
@@ -13,27 +13,26 @@ jobs:
         with:
           node-version: '20'
 
-      # Build & start the app (ephemeral)
       - run: npm ci
-      - run: npm run build
+
+      - name: Build (exclude tests)
+        run: npx tsc -p tsconfig.build.json
+
       - run: node dist/main.js & echo $! > app.pid && sleep 2
 
-      # ZAP Baseline (generate HTML report)
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
           target: "http://localhost:3000"
           rules_file_name: ".zap/rules.tsv"
-          cmd_options: "-a -I -r zap-baseline.html"  # <-- writes HTML
+          cmd_options: "-a -I -r zap-baseline.html"
 
-      # Upload the ZAP HTML as an artifact
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
           path: zap-baseline.html
 
-      # SBOM (CycloneDX) and upload
       - name: SBOM (Syft CycloneDX)
         uses: anchore/sbom-action@v0
         with:
@@ -47,7 +46,6 @@ jobs:
           name: sbom
           path: sbom.cdx.json
 
-      # Trivy (optional screenshot of table output)
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
