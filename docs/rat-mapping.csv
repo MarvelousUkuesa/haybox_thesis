@@ -1,0 +1,5 @@
+Standard Item,Requirement,RAT Test(s),Gate
+ASVS 2.1.1 (JWT props),Validate iss/aud/exp/alg,unit: token-validation; integration: guard-deny-by-default,PR+SAST
+ASVS 5.x (Input validation),Centralized DTO validation,property: DTO fuzz; unit: encoder tests,PR
+API Top10 (BOLA),Cross-tenant access must 403,integration: idor.spec.ts; BDD: tenant scenario,PR+ZAP
+ASVS 14.2 (Headers),Strict headers on all responses,integration: security-headers.spec.ts,PR+ZAP

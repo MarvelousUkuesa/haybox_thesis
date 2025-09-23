@@ -1,0 +1,19 @@
+rules:
+  - id: no-dangerous-eval
+    languages: [javascript, typescript]
+    message: "Avoid eval / Function constructor"
+    severity: ERROR
+    patterns:
+      - pattern-either:
+        - pattern: eval(...)
+        - pattern: new Function(...)
+  - id: no-hardcoded-jwt-secret
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Hardcoded JWT secrets"
+    pattern: /jwt\.(sign|verify)\(.*,\s*['\"][^'\"]{8,}['\"]/i
+  - id: express-insecure-cookie
+    languages: [javascript, typescript]
+    message: "Set Cookie should be httpOnly and secure"
+    severity: WARNING
+    pattern: res.cookie(...)

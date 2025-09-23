@@ -1,0 +1,26 @@
+name: PR Gate (Fast Security)
+on:
+  pull_request:
+    branches: [ main ]
+jobs:
+  pr-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run test:sec
+      - name: Semgrep (curated)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: ./.semgrep/semgrep.yml
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --no-git -v --redact --config=.gitleaks.toml
+      - name: OSV Scanner
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: "--recursive ."

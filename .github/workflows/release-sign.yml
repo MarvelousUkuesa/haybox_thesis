@@ -1,0 +1,48 @@
+name: Release (Sign & Attest)
+on:
+  push:
+    tags: ["v*.*.*"]
+jobs:
+  build-sign:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci && npm run build
+      - name: Build image
+        run: |
+          echo "FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --omit=dev\nCOPY dist ./dist\nCMD [\"node\", \"dist/main.js\"]" > Dockerfile
+          docker build -t ghcr.io/${{ github.repository }}:${{ github.ref_name }} .
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push image
+        run: docker push ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign image (keyless OIDC)
+        run: cosign sign ghcr.io/${{ github.repository }}:${{ github.ref_name }} --yes
+      - name: Generate build provenance (attestation)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+      - name: Upload evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-bundle
+          path: |
+            sbom.cdx.json
+            .zap/*
+            reports/*
+        if: always()

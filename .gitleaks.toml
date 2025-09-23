@@ -1,0 +1,7 @@
+title = "gitleaks config"
+[allowlist]
+description = "Allow common test secrets"
+paths = [
+  "test/",
+  ".zap/"
+]

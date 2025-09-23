@@ -1,0 +1,3 @@
+10010	IGNORE	Cacheable HTTPS response
+10015	IGNORE	Information disclosure in alert & error messages
+90033	WARN	Web browser XSS protection not enabled
