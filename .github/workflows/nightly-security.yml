@@ -1,8 +1,8 @@
 name: Nightly Security
 on:
   schedule:
-    - cron: '0 1 * * *'
-  workflow_dispatch:
+    - cron: '0 1 * * *'   # nightly
+  workflow_dispatch:       # allow manual run
 
 jobs:
   nightly:
@@ -13,30 +13,58 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm ci
+      # Detect app directory (repo root or subfolder)
+      - name: Find app directory
+        id: find
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            echo "appdir=." >> "$GITHUB_OUTPUT"
+          elif [ -f paybox-stdd-starter/package.json ]; then
+            echo "appdir=paybox-stdd-starter" >> "$GITHUB_OUTPUT"
+          else
+            echo "Could not find package.json at repo root or paybox-stdd-starter/"
+            ls -laR | sed -n '1,200p'
+            exit 1
+          fi
+          echo "App dir is: $(cat "$GITHUB_OUTPUT" | sed -n 's/^appdir=//p')"
 
+      # Install deps
+      - name: Install
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: npm ci
+
+      # Build ONLY src/ using the build tsconfig (avoids TS6059)
       - name: Build (exclude tests)
+        working-directory: ${{ steps.find.outputs.appdir }}
         run: npx tsc -p tsconfig.build.json
 
-      - run: node dist/main.js & echo $! > app.pid && sleep 2
+      # Start the app (ephemeral)
+      - name: Start app
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: node dist/main.js & echo $! > app.pid && sleep 2
 
+      # ZAP Baseline (generates zap-baseline.html at workspace root)
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
           target: "http://localhost:3000"
-          rules_file_name: ".zap/rules.tsv"
+          rules_file_name: "${{ steps.find.outputs.appdir }}/.zap/rules.tsv"
           cmd_options: "-a -I -r zap-baseline.html"
 
+      # Upload ZAP HTML report
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
           path: zap-baseline.html
 
+      # SBOM (CycloneDX) for the app dir
       - name: SBOM (Syft CycloneDX)
         uses: anchore/sbom-action@v0
         with:
-          path: "."
+          path: "${{ steps.find.outputs.appdir }}"
           format: "cyclonedx-json"
           output-file: "sbom.cdx.json"
 
@@ -46,13 +74,22 @@ jobs:
           name: sbom
           path: sbom.cdx.json
 
+      # Trivy filesystem scan (just the app dir)
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
           scan-type: 'fs'
+          scan-ref: '${{ steps.find.outputs.appdir }}'
           ignore-unfixed: true
           format: 'table'
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
 
-      - run: kill $(cat app.pid) || true
+      # Stop the app
+      - name: Stop app
+        if: always()
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: |
+          if [ -f app.pid ]; then
+            kill "$(cat app.pid)" || true
+          fi
