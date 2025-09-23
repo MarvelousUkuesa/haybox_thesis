@@ -1,7 +1,7 @@
 name: Nightly Security
 on:
   schedule:
-    - cron: "0 1 * * *"
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
@@ -9,59 +9,101 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
-      # Prefer the real app subfolder if present; otherwise fall back to root
+      # 1) Find the real app directory (prefer a folder that depends on NestJS)
       - name: Find app directory
         id: find
         shell: bash
         run: |
           set -euo pipefail
+          # Prefer common subfolder name if present
           if [ -f paybox-stdd-starter/package.json ]; then
             echo "appdir=paybox-stdd-starter" >> "$GITHUB_OUTPUT"
-          elif [ -f package.json ] && [ -f src/main.ts ]; then
-            echo "appdir=." >> "$GITHUB_OUTPUT"
           else
-            # Try to auto-detect: first package.json that also has tsconfig.json or src/main.ts
-            CANDIDATE=$(git ls-files **/package.json | while read p; do d=$(dirname "$p"); { test -f "$d/tsconfig.json" || test -f "$d/src/main.ts"; } && echo "$d" && break; done)
-            if [ -n "${CANDIDATE:-}" ]; then
-              echo "appdir=$CANDIDATE" >> "$GITHUB_OUTPUT"
+            # Look for a package.json that mentions NestJS
+            target=""
+            while IFS= read -r p; do
+              if grep -q '"@nestjs/common"' "$p"; then
+                target="$(dirname "$p")"
+                break
+              fi
+            done < <(git ls-files '**/package.json')
+            if [ -n "${target}" ]; then
+              echo "appdir=${target}" >> "$GITHUB_OUTPUT"
+            elif [ -f package.json ]; then
+              echo "appdir=." >> "$GITHUB_OUTPUT"
             else
-              echo "❌ Could not find a Node app directory."
-              ls -laR | sed -n '1,200p'
-              exit 1
+              echo "❌ Could not find a Node app directory"; ls -laR | sed -n '1,200p'; exit 1
             fi
           fi
           echo "Using appdir=${{ steps.find.outputs.appdir }}"
 
       - name: Debug layout
+        shell: bash
         run: |
-          echo "Repo root:"; pwd; ls -la
-          echo "App dir: ${{ steps.find.outputs.appdir }}"
-          ls -la "${{ steps.find.outputs.appdir }}"
+          echo "[root]"; pwd; ls -la
+          echo "[app]  ${{ steps.find.outputs.appdir }}"; ls -la "${{ steps.find.outputs.appdir }}"
+          echo "[app package.json head]"; head -n 40 "${{ steps.find.outputs.appdir }}/package.json" || true
 
-      - name: Install deps (include dev)
+      # 2) Install dependencies in the APP DIR (include dev)
+      - name: Install deps
         working-directory: ${{ steps.find.outputs.appdir }}
-        run: npm ci --include=dev
+        env:
+          NODE_ENV: ""   # ensure devDependencies install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          npm ls @nestjs/common class-validator helmet || true
 
-      # Ensure TypeScript is available locally and use LOCAL compiler (no npx)
+      # 3) Ensure local TypeScript and build-only tsconfig exist
       - name: Ensure TypeScript compiler
         working-directory: ${{ steps.find.outputs.appdir }}
         run: |
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
 
-      # Build ONLY src/ (avoid TS6059 on tests)
+      - name: Ensure build tsconfig in app dir
+        working-directory: ${{ steps.find.outputs.appdir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f tsconfig.build.json ]; then
+            if [ -f ../tsconfig.build.json ]; then
+              cp ../tsconfig.build.json ./tsconfig.build.json
+              echo "Copied tsconfig.build.json from repo root."
+            else
+              cat > tsconfig.build.json <<'JSON'
+              {
+                "extends": "./tsconfig.json",
+                "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+                "include": ["src/**/*.ts"],
+                "exclude": ["test", "**/*.spec.ts", "node_modules", "dist"]
+              }
+              JSON
+              echo "Created default tsconfig.build.json in app dir."
+            fi
+          fi
+          echo "---- tsconfig.build.json ----"
+          cat tsconfig.build.json
+
+      # 4) Build ONLY src/ (avoids compiling tests)
       - name: Build (exclude tests)
         working-directory: ${{ steps.find.outputs.appdir }}
         run: ./node_modules/.bin/tsc -p tsconfig.build.json
 
+      # 5) Start app
       - name: Start app
         working-directory: ${{ steps.find.outputs.appdir }}
         run: node dist/main.js & echo $! > app.pid && sleep 2
 
+      # 6) ZAP Baseline (DAST) -> zap-baseline.html
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
@@ -75,6 +117,7 @@ jobs:
           name: zap-report
           path: zap-baseline.html
 
+      # 7) SBOM (CycloneDX) for app dir
       - name: SBOM (Syft CycloneDX)
         uses: anchore/sbom-action@v0
         with:
@@ -88,15 +131,16 @@ jobs:
           name: sbom
           path: sbom.cdx.json
 
+      # 8) Trivy filesystem scan (optional)
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
-          scan-type: "fs"
-          scan-ref: "${{ steps.find.outputs.appdir }}"
+          scan-type: 'fs'
+          scan-ref: '${{ steps.find.outputs.appdir }}'
           ignore-unfixed: true
-          format: "table"
-          exit-code: "1"
-          severity: "HIGH,CRITICAL"
+          format: 'table'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
 
       - name: Stop app
         if: always()
