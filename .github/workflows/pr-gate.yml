@@ -26,14 +26,14 @@ jobs:
           elif [ -f paybox-stdd-starter/package.json ]; then
             echo "appdir=paybox-stdd-starter" >> "$GITHUB_OUTPUT"
           else
-            echo "❌ Could not find package.json at repo root or paybox-stdd-starter/"
-            echo "Repo tree (top 200 lines):"
+            echo "Could not find package.json at repo root or paybox-stdd-starter/"
             ls -laR | sed -n '1,200p'
             exit 1
           fi
-          echo "Using appdir: $(cat "$GITHUB_OUTPUT" | sed -n 's/^appdir=//p')"
+          echo "Using appdir set in GITHUB_OUTPUT"
 
       - name: Debug layout
+        shell: bash
         run: |
           echo "Repo root:"
           pwd
@@ -70,17 +70,18 @@ jobs:
         with:
           config: ${{ steps.find.outputs.appdir }}/.semgrep/semgrep.yml
 
-      # 6) - name: Gitleaks
-    uses: gitleaks/gitleaks-action@v2
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # <-- required for PRs
-    with:
-      args: >-
-        detect
-        --no-git
-        --verbose
-        --redact
-        --config=${{ steps.find.outputs.appdir }}/.gitleaks.toml
+      # 6) Gitleaks (needs GITHUB_TOKEN on PRs)
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: >-
+            detect
+            --no-git
+            --verbose
+            --redact
+            --config=${{ steps.find.outputs.appdir }}/.gitleaks.toml
 
   # OSV v2 runs as a reusable workflow (not a step)
   osv-scan:
