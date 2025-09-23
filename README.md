@@ -48,4 +48,4 @@ docker run --rm -t owasp/zap2docker-stable zap-baseline.py -t http://host.docker
 
 # generate SBOM locally
 docker run --rm -v $PWD:/workspace anchore/syft packages dir:/workspace -o cyclonedx-json > sbom.cdx.json
-```
+```....
