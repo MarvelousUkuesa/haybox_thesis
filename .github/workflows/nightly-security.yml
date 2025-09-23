@@ -1,8 +1,8 @@
 name: Nightly Security
 on:
   schedule:
-    - cron: '0 1 * * *'   # nightly
-  workflow_dispatch:       # allow manual run
+    - cron: '0 1 * * *'
+  workflow_dispatch:
 
 jobs:
   nightly:
@@ -28,19 +28,24 @@ jobs:
             ls -laR | sed -n '1,200p'
             exit 1
           fi
-          echo "App dir is: $(cat "$GITHUB_OUTPUT" | sed -n 's/^appdir=//p')"
 
-      # Install deps
-      - name: Install
+      - name: Install deps
         working-directory: ${{ steps.find.outputs.appdir }}
         run: npm ci
 
-      # Build ONLY src/ using the build tsconfig (avoids TS6059)
+      # Ensure the TypeScript compiler exists locally, then show version
+      - name: Ensure TypeScript compiler
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: |
+          npm ls typescript --depth=0 || npm i -D typescript@5
+          ./node_modules/.bin/tsc -v
+
+      # Build ONLY src/ using a build tsconfig (avoids TS6059 on tests)
       - name: Build (exclude tests)
         working-directory: ${{ steps.find.outputs.appdir }}
-        run: npx tsc -p tsconfig.build.json
+        run: ./node_modules/.bin/tsc -p tsconfig.build.json
 
-      # Start the app (ephemeral)
+      # Start the app
       - name: Start app
         working-directory: ${{ steps.find.outputs.appdir }}
         run: node dist/main.js & echo $! > app.pid && sleep 2
@@ -53,7 +58,6 @@ jobs:
           rules_file_name: "${{ steps.find.outputs.appdir }}/.zap/rules.tsv"
           cmd_options: "-a -I -r zap-baseline.html"
 
-      # Upload ZAP HTML report
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         with:
@@ -74,7 +78,7 @@ jobs:
           name: sbom
           path: sbom.cdx.json
 
-      # Trivy filesystem scan (just the app dir)
+      # Trivy scan of the app dir
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
@@ -85,7 +89,6 @@ jobs:
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
 
-      # Stop the app
       - name: Stop app
         if: always()
         working-directory: ${{ steps.find.outputs.appdir }}
