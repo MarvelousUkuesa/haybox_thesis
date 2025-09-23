@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
   security-events: write
   actions: read
 
@@ -69,11 +70,17 @@ jobs:
         with:
           config: ${{ steps.find.outputs.appdir }}/.semgrep/semgrep.yml
 
-      # 6) Gitleaks (point to the config where it actually is)
-      - name: Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        with:
-          args: detect --no-git -v --redact --config=${{ steps.find.outputs.appdir }}/.gitleaks.toml
+      # 6) - name: Gitleaks
+    uses: gitleaks/gitleaks-action@v2
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # <-- required for PRs
+    with:
+      args: >-
+        detect
+        --no-git
+        --verbose
+        --redact
+        --config=${{ steps.find.outputs.appdir }}/.gitleaks.toml
 
   # OSV v2 runs as a reusable workflow (not a step)
   osv-scan:
