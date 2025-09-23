@@ -1,16 +1,9 @@
 {
+  "extends": "./tsconfig.json",
   "compilerOptions": {
-    "target": "ES2021",
-    "module": "CommonJS",
-    "moduleResolution": "Node",
-    "outDir": "dist",
     "rootDir": "src",
-    "strict": true,
-    "esModuleInterop": true,
-    "emitDecoratorMetadata": true,
-    "experimentalDecorators": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "outDir": "dist"
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["test", "**/*.spec.ts", "node_modules", "dist"]
 }
