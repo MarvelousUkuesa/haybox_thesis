@@ -7,23 +7,18 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-
-  // Allow CI to override, but default to 3000/0.0.0.0
-  const port = parseInt(process.env.PORT ?? '3000', 10);
-  const host = process.env.HOST ?? '0.0.0.0';
-
   const app = await NestFactory.create(AppModule);
 
   // --- Security headers ---
-  app.use(helmet()); // includes X-Content-Type-Options: nosniff
+  app.use(helmet());
   app.use(
     helmet.contentSecurityPolicy({
       useDefaults: true,
       directives: { defaultSrc: ["'none'"] },
     })
   );
-  app.use(helmet.frameguard({ action: 'deny' })); // X-Frame-Options: DENY
-  app.use(helmet.hsts({ maxAge: 15552000 }));     // Strict-Transport-Security
+  app.use(helmet.frameguard({ action: 'deny' }));
+  app.use(helmet.hsts({ maxAge: 15_552_000 }));
   app.use(helmet.referrerPolicy({ policy: 'no-referrer' }));
 
   // --- Rate limiting & validation ---
@@ -36,13 +31,12 @@ async function bootstrap() {
     })
   );
 
-  await app.listen(port, host);
-  logger.log(`HTTP server listening on http://${host}:${port}`);
+  // Bind to 0.0.0.0 so ZAP (host networking) can reach it
+  await app.listen(Number(process.env.PORT ?? 3000), process.env.HOST ?? '0.0.0.0');
+  logger.log(`HTTP server listening on http://${process.env.HOST ?? '0.0.0.0'}:${process.env.PORT ?? 3000}`);
 }
 
 bootstrap().catch((err) => {
-  // Ensure CI prints a useful error if boot fails
-  // eslint-disable-next-line no-console
   console.error('❌ Nest failed to start:', err);
   process.exit(1);
 });
