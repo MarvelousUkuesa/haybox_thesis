@@ -1,64 +1,110 @@
 name: Nightly Security
 on:
-  schedule: [{ cron: '0 1 * * *' }]
+  schedule:
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
   nightly:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: paybox-stdd-starter   # <--- your app folder
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with:
+          node-version: '20'
 
-      - name: Install deps (include dev)
-        run: npm ci --include=dev
+      # Detect app dir (prefer subfolder if present; else root)
+      - name: Detect app directory
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f paybox-stdd-starter/package.json ]; then
+            APPDIR="paybox-stdd-starter"
+          elif [ -f package.json ]; then
+            APPDIR="."
+          else
+            first_pkg=$(git ls-files '**/package.json' | head -n1 || true)
+            APPDIR="${first_pkg%/*}"
+            [ -z "$APPDIR" ] && { echo "::error::No package.json found"; exit 1; }
+          fi
+          echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
+          echo "Using APPDIR=$APPDIR"
 
+      - name: Debug repo layout
+        shell: bash
+        run: |
+          echo "[root]"; pwd; ls -la
+          echo "[app]  $APPDIR"; ls -la "$APPDIR"
+          echo "[app package.json head]"; head -n 40 "$APPDIR/package.json" || true
+
+      # Install deps in APPDIR (dev deps included so jest/tsc are available)
+      - name: Install deps
+        working-directory: ${{ env.APPDIR }}
+        env:
+          NODE_ENV: ""     # ensure devDependencies install
+        run: |
+          if [ -f package-lock.json ]; then npm ci --include=dev; else npm install; fi
+          echo "---- sanity ----"
+          npm ls @nestjs/common @nestjs/core helmet express-rate-limit class-validator class-transformer crypto-js || true
+
+      # Ensure TypeScript locally (no npx fallback)
       - name: Ensure TypeScript compiler
+        working-directory: ${{ env.APPDIR }}
         run: |
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
-          npm ls @nestjs/common class-validator helmet || true
 
+      # Build ONLY src/ (no tests) using a build tsconfig in APPDIR
       - name: Build (exclude tests)
+        working-directory: ${{ env.APPDIR }}
         run: ./node_modules/.bin/tsc -p tsconfig.build.json
 
       - name: Start app
+        working-directory: ${{ env.APPDIR }}
         run: node dist/main.js & echo $! > app.pid && sleep 2
 
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
           target: "http://localhost:3000"
-          rules_file_name: ".zap/rules.tsv"
+          rules_file_name: "${{ env.APPDIR }}/.zap/rules.tsv"
           cmd_options: "-a -I -r zap-baseline.html"
 
-      - uses: actions/upload-artifact@v4
-        with: { name: zap-report, path: zap-baseline.html }
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap-baseline.html
 
       - name: SBOM (Syft CycloneDX)
         uses: anchore/sbom-action@v0
         with:
-          path: "."
+          path: "${{ env.APPDIR }}"
           format: "cyclonedx-json"
           output-file: "sbom.cdx.json"
 
-      - uses: actions/upload-artifact@v4
-        with: { name: sbom, path: sbom.cdx.json }
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
 
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
           scan-type: 'fs'
-          scan-ref: '.'
+          scan-ref: '${{ env.APPDIR }}'
           ignore-unfixed: true
           format: 'table'
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
 
+      # Don't set working-directory here; reference path explicitly so it never 404s
       - name: Stop app
         if: always()
-        run: if [ -f app.pid ]; then kill "$(cat app.pid)" || true; fi
+        shell: bash
+        run: |
+          if [ -f "$APPDIR/app.pid" ]; then
+            kill "$(cat "$APPDIR/app.pid")" || true
+          fi
