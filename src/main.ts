@@ -1,29 +1,28 @@
-import "reflect-metadata";
-import { NestFactory } from "@nestjs/core";
-import { AppModule } from "./app.module";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
-import { ValidationPipe } from "@nestjs/common";
+import 'reflect-metadata';
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import { ValidationPipe, Logger } from '@nestjs/common';
 
 async function bootstrap() {
+  const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 
-  // 1) Enable Helmet defaults (includes noSniff)
+  // --- Security headers ---
   app.use(helmet());
-
-  // 2) Override/strengthen specific headers explicitly
   app.use(
     helmet.contentSecurityPolicy({
       useDefaults: true,
       directives: { defaultSrc: ["'none'"] },
     })
   );
-  app.use(helmet.frameguard({ action: "deny" })); // X-Frame-Options: DENY
-  app.use(helmet.hsts({ maxAge: 15552000 })); // Strict-Transport-Security
-  app.use(helmet.referrerPolicy({ policy: "no-referrer" })); // Referrer-Policy
+  app.use(helmet.frameguard({ action: 'deny' }));
+  app.use(helmet.hsts({ maxAge: 15_552_000 }));
+  app.use(helmet.referrerPolicy({ policy: 'no-referrer' }));
 
-  // Rate limit + validation
-  app.use(rateLimit({ windowMs: 60 * 1000, max: 60 }));
+  // --- Rate limiting & validation ---
+  app.use(rateLimit({ windowMs: 60_000, max: 60 }));
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -32,6 +31,12 @@ async function bootstrap() {
     })
   );
 
-  await app.listen(3000);
+  // Bind to 0.0.0.0 so ZAP (host networking) can reach it
+  await app.listen(Number(process.env.PORT ?? 3000), process.env.HOST ?? '0.0.0.0');
+  logger.log(`HTTP server listening on http://${process.env.HOST ?? '0.0.0.0'}:${process.env.PORT ?? 3000}`);
 }
-bootstrap();
+
+bootstrap().catch((err) => {
+  console.error('❌ Nest failed to start:', err);
+  process.exit(1);
+});
