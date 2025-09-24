@@ -13,7 +13,7 @@ jobs:
         with:
           node-version: '20'
 
-      # Detect app dir (prefer subfolder if it exists; else root)
+      # Detect app dir (prefer subfolder if present; else root)
       - name: Detect app directory
         id: detect
         shell: bash
@@ -38,20 +38,24 @@ jobs:
           echo "[app]  $APPDIR"; ls -la "$APPDIR"
           echo "[app package.json head]"; head -n 40 "$APPDIR/package.json" || true
 
-      - name: Install deps (include dev)
+      # Install deps in APPDIR (dev deps included so jest/tsc are available)
+      - name: Install deps
         working-directory: ${{ env.APPDIR }}
         env:
-          NODE_ENV: ""   # ensure devDependencies install
+          NODE_ENV: ""     # ensure devDependencies install
         run: |
           if [ -f package-lock.json ]; then npm ci --include=dev; else npm install; fi
-          npm ls @nestjs/common class-validator helmet || true
+          echo "---- sanity ----"
+          npm ls @nestjs/common @nestjs/core helmet express-rate-limit class-validator class-transformer crypto-js || true
 
+      # Ensure TypeScript locally (no npx fallback)
       - name: Ensure TypeScript compiler
         working-directory: ${{ env.APPDIR }}
         run: |
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
 
+      # Build ONLY src/ (no tests) using a build tsconfig in APPDIR
       - name: Build (exclude tests)
         working-directory: ${{ env.APPDIR }}
         run: ./node_modules/.bin/tsc -p tsconfig.build.json
@@ -96,7 +100,7 @@ jobs:
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
 
-      # Don't set working-directory here—use explicit path so this never 404s
+      # Don't set working-directory here; reference path explicitly so it never 404s
       - name: Stop app
         if: always()
         shell: bash
