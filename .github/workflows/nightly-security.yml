@@ -103,11 +103,13 @@ JSON
           set -euo pipefail
           echo "Starting app on $HOST:$PORT ..."
           node dist/main.js > app.log 2>&1 & echo $! > app.pid
-          for i in {1..30}; do
-            if curl -fsS "http://localhost:${PORT}/health" >/dev/null 2>&1 || \
-               curl -fsS "http://localhost:${PORT}" >/dev/null 2>&1; then
+
+          # wait up to ~120s for /health or /
+          for i in {1..60}; do
+            if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 || \
+               curl -fsS "http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
               echo "App is up ✅"
-              exit 0
+              break
             fi
             if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
               echo "❌ App died during startup. Last 200 log lines:"; tail -n 200 app.log || true
@@ -115,15 +117,31 @@ JSON
             fi
             sleep 2
           done
-          echo "❌ Timed out waiting for app. Last 200 log lines:"; tail -n 200 app.log || true
-          exit 1
+
+          # double check the port is listening and the PID is alive
+          echo "Sanity check: process + port"
+          kill -0 "$(cat app.pid)"
+          (command -v ss >/dev/null && ss -ltnp | grep ':3000' -m1) || (command -v lsof >/dev/null && lsof -iTCP:3000 -sTCP:LISTEN -nP || true)
+          curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 || curl -fsS "http://127.0.0.1:${PORT}" >/dev/null 2>&1
+
+      # One last "still alive?" check RIGHT before ZAP
+      - name: Verify app still alive pre-ZAP
+        working-directory: ${{ env.APPDIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          kill -0 "$(cat app.pid)"
+          curl -fsS "http://127.0.0.1:3000/health" >/dev/null 2>&1 || curl -fsS "http://127.0.0.1:3000" >/dev/null 2>&1 || {
+            echo "❌ App not reachable pre-ZAP. Last 200 log lines:"
+            tail -n 200 app.log || true
+            exit 1
+          }
 
       # ZAP Baseline (DAST) -> zap-baseline.html
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
-          target: "http://localhost:3000"
-          rules_file_name: "${{ env.APPDIR }}/.zap/rules.tsv"
+          target: "http://127.0.0.1:3000"
           cmd_options: "-a -I -r zap-baseline.html"
 
       - name: Upload ZAP Report
