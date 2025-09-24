@@ -1,19 +1,20 @@
 name: Nightly Security
 on:
   schedule:
-    - cron: '0 1 * * *'
-  workflow_dispatch:
+    - cron: '0 1 * * *'   # nightly at 01:00 UTC
+  workflow_dispatch:       # allow manual runs
 
 jobs:
   nightly:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # Detect app dir (prefer subfolder if present; else root)
+      # Detect app dir (prefer subfolder if present; else repo root; else first package.json)
       - name: Detect app directory
         id: detect
         shell: bash
@@ -38,32 +39,86 @@ jobs:
           echo "[app]  $APPDIR"; ls -la "$APPDIR"
           echo "[app package.json head]"; head -n 40 "$APPDIR/package.json" || true
 
-      # Install deps in APPDIR (dev deps included so jest/tsc are available)
+      # Install deps in APPDIR (include dev so jest/tsc exist)
       - name: Install deps
         working-directory: ${{ env.APPDIR }}
         env:
-          NODE_ENV: ""     # ensure devDependencies install
+          NODE_ENV: ""
         run: |
           if [ -f package-lock.json ]; then npm ci --include=dev; else npm install; fi
           echo "---- sanity ----"
           npm ls @nestjs/common @nestjs/core helmet express-rate-limit class-validator class-transformer crypto-js || true
 
-      # Ensure TypeScript locally (no npx fallback)
+      # Ensure local TypeScript (no npx fallback)
       - name: Ensure TypeScript compiler
         working-directory: ${{ env.APPDIR }}
         run: |
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
 
-      # Build ONLY src/ (no tests) using a build tsconfig in APPDIR
+      # Ensure a build-only tsconfig in APPDIR (only compiles src/**)
+      - name: Ensure tsconfig.build.json in APPDIR
+        working-directory: ${{ env.APPDIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f tsconfig.build.json ]; then
+            if [ -f ../tsconfig.build.json ]; then
+              cp ../tsconfig.build.json ./tsconfig.build.json
+              echo "Copied tsconfig.build.json from repo root."
+            else
+              cat > tsconfig.build.json <<'JSON'
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "include": ["src/**/*.ts"],
+  "exclude": ["test", "**/*.spec.ts", "node_modules", "dist"]
+}
+JSON
+              echo "Created default tsconfig.build.json in app dir."
+            fi
+          fi
+          echo "---- tsconfig.build.json ----"
+          cat tsconfig.build.json
+
+      # Build ONLY src/ (avoid TS6059 on tests)
       - name: Build (exclude tests)
         working-directory: ${{ env.APPDIR }}
         run: ./node_modules/.bin/tsc -p tsconfig.build.json
 
-      - name: Start app
+      # Start app and WAIT until it's reachable; dump logs on failure
+      - name: Start app & wait for readiness
         working-directory: ${{ env.APPDIR }}
-        run: node dist/main.js & echo $! > app.pid && sleep 2
+        env:
+          HOST: "0.0.0.0"
+          PORT: "3000"
+          NODE_ENV: "production"
+          # Add safe defaults your app needs to boot in CI:
+          JWT_ISS: "ci-issuer"
+          JWT_AUD: "ci-audience"
+          JWT_SECRET: "ci-secret"
+          WEBHOOK_SECRET: "ci-webhook-secret"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Starting app on $HOST:$PORT ..."
+          node dist/main.js > app.log 2>&1 & echo $! > app.pid
+          for i in {1..30}; do
+            if curl -fsS "http://localhost:${PORT}/health" >/dev/null 2>&1 || \
+               curl -fsS "http://localhost:${PORT}" >/dev/null 2>&1; then
+              echo "App is up ✅"
+              exit 0
+            fi
+            if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
+              echo "❌ App died during startup. Last 200 log lines:"; tail -n 200 app.log || true
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "❌ Timed out waiting for app. Last 200 log lines:"; tail -n 200 app.log || true
+          exit 1
 
+      # ZAP Baseline (DAST) -> zap-baseline.html
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
@@ -77,6 +132,7 @@ jobs:
           name: zap-report
           path: zap-baseline.html
 
+      # SBOM (CycloneDX) for APPDIR
       - name: SBOM (Syft CycloneDX)
         uses: anchore/sbom-action@v0
         with:
@@ -90,6 +146,7 @@ jobs:
           name: sbom
           path: sbom.cdx.json
 
+      # Trivy filesystem scan of APPDIR (optional hard gate)
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
@@ -100,7 +157,15 @@ jobs:
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
 
-      # Don't set working-directory here; reference path explicitly so it never 404s
+      # Always show logs if anything failed after start
+      - name: Show app logs (on failure)
+        if: failure()
+        working-directory: ${{ env.APPDIR }}
+        run: |
+          echo "---- app.log (last 400 lines) ----"
+          tail -n 400 app.log || true
+
+      # Stop app (no working-directory; reference explicit path)
       - name: Stop app
         if: always()
         shell: bash
