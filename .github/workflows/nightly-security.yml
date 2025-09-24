@@ -13,7 +13,7 @@ jobs:
         with:
           node-version: '20'
 
-      # Detect app dir (prefer a folder that has NestJS deps; else root if it has package.json)
+      # Detect app dir (prefer subfolder if it exists; else root)
       - name: Detect app directory
         id: detect
         shell: bash
@@ -24,7 +24,6 @@ jobs:
           elif [ -f package.json ]; then
             APPDIR="."
           else
-            # fallback: first package.json in tree
             first_pkg=$(git ls-files '**/package.json' | head -n1 || true)
             APPDIR="${first_pkg%/*}"
             [ -z "$APPDIR" ] && { echo "::error::No package.json found"; exit 1; }
@@ -39,58 +38,28 @@ jobs:
           echo "[app]  $APPDIR"; ls -la "$APPDIR"
           echo "[app package.json head]"; head -n 40 "$APPDIR/package.json" || true
 
-      # Install deps in the APPDIR (includes dev for Jest/tsc)
-      - name: Install deps
+      - name: Install deps (include dev)
         working-directory: ${{ env.APPDIR }}
         env:
-          NODE_ENV: ""  # ensure devDependencies get installed
+          NODE_ENV: ""   # ensure devDependencies install
         run: |
           if [ -f package-lock.json ]; then npm ci --include=dev; else npm install; fi
           npm ls @nestjs/common class-validator helmet || true
 
-      # Ensure local TypeScript (no npx), and a build-only tsconfig in APPDIR
       - name: Ensure TypeScript compiler
         working-directory: ${{ env.APPDIR }}
         run: |
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
 
-      - name: Ensure tsconfig.build.json in APPDIR
-        working-directory: ${{ env.APPDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -f tsconfig.build.json ]; then
-            if [ -f ../tsconfig.build.json ]; then
-              cp ../tsconfig.build.json ./tsconfig.build.json
-              echo "Copied tsconfig.build.json from repo root."
-            else
-              # Write file with a correct, flush-left heredoc terminator
-              cat > tsconfig.build.json <<'JSON'
-{
-  "extends": "./tsconfig.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"],
-  "exclude": ["test", "**/*.spec.ts", "node_modules", "dist"]
-}
-JSON
-              echo "Created default tsconfig.build.json in app dir."
-            fi
-          fi
-          echo "---- tsconfig.build.json ----"
-          cat tsconfig.build.json
-
-      # Build ONLY src/ (avoids compiling test/**)
       - name: Build (exclude tests)
         working-directory: ${{ env.APPDIR }}
         run: ./node_modules/.bin/tsc -p tsconfig.build.json
 
-      # Start the app
       - name: Start app
         working-directory: ${{ env.APPDIR }}
         run: node dist/main.js & echo $! > app.pid && sleep 2
 
-      # ZAP Baseline -> zap-baseline.html (at workspace root)
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
@@ -104,7 +73,6 @@ JSON
           name: zap-report
           path: zap-baseline.html
 
-      # SBOM (CycloneDX) for APPDIR
       - name: SBOM (Syft CycloneDX)
         uses: anchore/sbom-action@v0
         with:
@@ -118,7 +86,6 @@ JSON
           name: sbom
           path: sbom.cdx.json
 
-      # Trivy filesystem scan of APPDIR (optional)
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
@@ -129,7 +96,7 @@ JSON
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
 
-      # Do NOT set working-directory here—reference the path explicitly
+      # Don't set working-directory here—use explicit path so this never 404s
       - name: Stop app
         if: always()
         shell: bash
