@@ -58,11 +58,10 @@ jobs:
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
 
-      # Build ONLY src/ (requires tsconfig.build.json to be committed in APPDIR)
+      # Build ONLY src/ (requires tsconfig.build.json committed in APPDIR)
       - name: Build (exclude tests)
         working-directory: ${{ env.APPDIR }}
-        run: |
-          ./node_modules/.bin/tsc -p tsconfig.build.json
+        run: ./node_modules/.bin/tsc -p tsconfig.build.json
 
       # Start app and WAIT until it's reachable; dump logs on failure
       - name: Start app & wait for readiness
@@ -104,21 +103,17 @@ jobs:
             exit 1
           fi
 
-      # ZAP tuning: mute low-signal warnings we saw (cacheable 404s, Sec-Fetch-Dest)
+      # ZAP tuning: mute noisy checks without heredocs
       - name: Write ZAP rules (mute noisy checks)
         working-directory: ${{ env.APPDIR }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .zap
-          # Format: <pluginId>\t<threshold>\t<urlRegex>
-          # 10049 Storable/Cacheable Content  | 90005 Sec-Fetch-Dest Header Missing
-          cat > .zap/rules.tsv <<'TSV'
-10049	IGNORE	.*
-90005	IGNORE	.*
-TSV
+          # pluginId<TAB>threshold<TAB>urlRegex
+          printf "10049\tIGNORE\t.*\n90005\tIGNORE\t.*\n" > .zap/rules.tsv
           echo "---- .zap/rules.tsv ----"
-          cat .zap/rules.tsv
+          cat .zap/rules.tsv | sed -n '1,20p'
 
       # ZAP Baseline (DAST) -> zap-baseline.html
       # - target /health to avoid spider's '404 expected 200'
