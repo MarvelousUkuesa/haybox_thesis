@@ -2,7 +2,7 @@ name: Nightly Security
 on:
   schedule:
     - cron: '0 1 * * *'   # nightly at 01:00 UTC
-  workflow_dispatch:       # allow manual runs
+  workflow_dispatch:
 
 jobs:
   nightly:
@@ -14,7 +14,7 @@ jobs:
         with:
           node-version: '20'
 
-      # Detect app dir (prefer subfolder if present; else repo root; else first package.json)
+      # Detect app dir (prefer known subfolder; else repo root; else first package.json)
       - name: Detect app directory
         id: detect
         shell: bash
@@ -25,7 +25,7 @@ jobs:
           elif [ -f package.json ]; then
             APPDIR="."
           else
-            first_pkg=$(git ls-files '**/package.json' | head -n1 || true)
+            first_pkg="$(git ls-files '**/package.json' | head -n1 || true)"
             APPDIR="${first_pkg%/*}"
             [ -z "$APPDIR" ] && { echo "::error::No package.json found"; exit 1; }
           fi
@@ -39,52 +39,30 @@ jobs:
           echo "[app]  $APPDIR"; ls -la "$APPDIR"
           echo "[app package.json head]"; head -n 40 "$APPDIR/package.json" || true
 
-      # Install deps in APPDIR (include dev so jest/tsc exist)
-      - name: Install deps
+      - name: Install deps (include dev)
         working-directory: ${{ env.APPDIR }}
         env:
           NODE_ENV: ""
         run: |
-          if [ -f package-lock.json ]; then npm ci --include=dev; else npm install; fi
+          if [ -f package-lock.json ]; then
+            npm ci --include=dev
+          else
+            npm install
+          fi
           echo "---- sanity ----"
           npm ls @nestjs/common @nestjs/core helmet express-rate-limit class-validator class-transformer crypto-js || true
 
-      # Ensure local TypeScript (no npx fallback)
       - name: Ensure TypeScript compiler
         working-directory: ${{ env.APPDIR }}
         run: |
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
 
-      # Ensure a build-only tsconfig in APPDIR (only compiles src/**)
-      - name: Ensure tsconfig.build.json in APPDIR
-        working-directory: ${{ env.APPDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -f tsconfig.build.json ]; then
-            if [ -f ../tsconfig.build.json ]; then
-              cp ../tsconfig.build.json ./tsconfig.build.json
-              echo "Copied tsconfig.build.json from repo root."
-            else
-              cat > tsconfig.build.json <<'JSON'
-{
-  "extends": "./tsconfig.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"],
-  "exclude": ["test", "**/*.spec.ts", "node_modules", "dist"]
-}
-JSON
-              echo "Created default tsconfig.build.json in app dir."
-            fi
-          fi
-          echo "---- tsconfig.build.json ----"
-          cat tsconfig.build.json
-
-      # Build ONLY src/ (avoid TS6059 on tests)
+      # Build ONLY src/ (requires tsconfig.build.json to be committed in APPDIR)
       - name: Build (exclude tests)
         working-directory: ${{ env.APPDIR }}
-        run: ./node_modules/.bin/tsc -p tsconfig.build.json
+        run: |
+          ./node_modules/.bin/tsc -p tsconfig.build.json
 
       # Start app and WAIT until it's reachable; dump logs on failure
       - name: Start app & wait for readiness
@@ -104,38 +82,27 @@ JSON
           echo "Starting app on $HOST:$PORT ..."
           node dist/main.js > app.log 2>&1 & echo $! > app.pid
 
-          # wait up to ~120s for /health or /
-          for i in {1..60}; do
+          ready=0
+          for i in $(seq 1 60); do
             if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 || \
                curl -fsS "http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
               echo "App is up ✅"
+              ready=1
               break
             fi
             if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
-              echo "❌ App died during startup. Last 200 log lines:"; tail -n 200 app.log || true
+              echo "❌ App died during startup. Last 200 log lines:"
+              tail -n 200 app.log || true
               exit 1
             fi
             sleep 2
           done
 
-          # double check the port is listening and the PID is alive
-          echo "Sanity check: process + port"
-          kill -0 "$(cat app.pid)"
-          (command -v ss >/dev/null && ss -ltnp | grep ':3000' -m1) || (command -v lsof >/dev/null && lsof -iTCP:3000 -sTCP:LISTEN -nP || true)
-          curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 || curl -fsS "http://127.0.0.1:${PORT}" >/dev/null 2>&1
-
-      # One last "still alive?" check RIGHT before ZAP
-      - name: Verify app still alive pre-ZAP
-        working-directory: ${{ env.APPDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          kill -0 "$(cat app.pid)"
-          curl -fsS "http://127.0.0.1:3000/health" >/dev/null 2>&1 || curl -fsS "http://127.0.0.1:3000" >/dev/null 2>&1 || {
-            echo "❌ App not reachable pre-ZAP. Last 200 log lines:"
+          if [ "$ready" -ne 1 ]; then
+            echo "❌ Timed out waiting for app. Last 200 log lines:"
             tail -n 200 app.log || true
             exit 1
-          }
+          fi
 
       # ZAP Baseline (DAST) -> zap-baseline.html
       - name: ZAP Baseline (passive)
@@ -164,7 +131,7 @@ JSON
           name: sbom
           path: sbom.cdx.json
 
-      # Trivy filesystem scan of APPDIR (optional hard gate)
+      # Trivy filesystem scan of APPDIR
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
@@ -175,7 +142,6 @@ JSON
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
 
-      # Always show logs if anything failed after start
       - name: Show app logs (on failure)
         if: failure()
         working-directory: ${{ env.APPDIR }}
@@ -183,7 +149,6 @@ JSON
           echo "---- app.log (last 400 lines) ----"
           tail -n 400 app.log || true
 
-      # Stop app (no working-directory; reference explicit path)
       - name: Stop app
         if: always()
         shell: bash
