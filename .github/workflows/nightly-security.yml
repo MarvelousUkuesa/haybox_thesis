@@ -1,7 +1,7 @@
 name: Nightly Security
 on:
   schedule:
-    - cron: '0 1 * * *'   # nightly at 01:00 UTC
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,7 +14,7 @@ jobs:
         with:
           node-version: '20'
 
-      # Detect app dir (prefer known subfolder; else repo root; else first package.json)
+      # Detect app dir
       - name: Detect app directory
         id: detect
         shell: bash
@@ -58,19 +58,16 @@ jobs:
           npm ls typescript --depth=0 || npm i -D typescript@5
           ./node_modules/.bin/tsc -v
 
-      # Build ONLY src/ (requires tsconfig.build.json committed in APPDIR)
       - name: Build (exclude tests)
         working-directory: ${{ env.APPDIR }}
         run: ./node_modules/.bin/tsc -p tsconfig.build.json
 
-      # Start app and WAIT until it's reachable; dump logs on failure
       - name: Start app & wait for readiness
         working-directory: ${{ env.APPDIR }}
         env:
           HOST: "0.0.0.0"
           PORT: "3000"
           NODE_ENV: "production"
-          # Safe defaults so the app can boot in CI:
           JWT_ISS: "ci-issuer"
           JWT_AUD: "ci-audience"
           JWT_SECRET: "ci-secret"
@@ -80,30 +77,21 @@ jobs:
           set -euo pipefail
           echo "Starting app on $HOST:$PORT ..."
           node dist/main.js > app.log 2>&1 & echo $! > app.pid
-
           ready=0
           for i in $(seq 1 60); do
             if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 || \
                curl -fsS "http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
-              echo "App is up ✅"
-              ready=1
-              break
+              echo "App is up ✅"; ready=1; break
             fi
             if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
-              echo "❌ App died during startup. Last 200 log lines:"
-              tail -n 200 app.log || true
-              exit 1
+              echo "❌ App died. Last 200 log lines:"; tail -n 200 app.log || true; exit 1
             fi
             sleep 2
           done
-
           if [ "$ready" -ne 1 ]; then
-            echo "❌ Timed out waiting for app. Last 200 log lines:"
-            tail -n 200 app.log || true
-            exit 1
+            echo "❌ Timed out. Last 200 log lines:"; tail -n 200 app.log || true; exit 1
           fi
 
-      # ZAP tuning: mute noisy checks without heredocs
       - name: Write ZAP rules (mute noisy checks)
         working-directory: ${{ env.APPDIR }}
         shell: bash
@@ -112,27 +100,26 @@ jobs:
           mkdir -p .zap
           # pluginId<TAB>threshold<TAB>urlRegex
           printf "10049\tIGNORE\t.*\n90005\tIGNORE\t.*\n" > .zap/rules.tsv
-          echo "---- .zap/rules.tsv ----"
-          cat .zap/rules.tsv | sed -n '1,20p'
+          echo "---- .zap/rules.tsv ----"; head -n 10 .zap/rules.tsv
 
-      # ZAP Baseline (DAST) -> zap-baseline.html
-      # - target /health to avoid spider's '404 expected 200'
-      # - disable issue writing to avoid 403 'Resource not accessible by integration'
+      # ZAP Baseline (default outputs: report_html.html, report_md.md, report_json.json)
       - name: ZAP Baseline (passive)
         uses: zaproxy/action-baseline@v0.14.0
         with:
           target: "http://127.0.0.1:3000/health"
-          cmd_options: "-a -I -r zap-baseline.html"
+          cmd_options: "-a -I"                 # <— no -r override
           allow_issue_writing: false
           rules_file_name: "${{ env.APPDIR }}/.zap/rules.tsv"
 
-      - name: Upload ZAP Report
+      - name: Upload ZAP Reports
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
-          path: zap-baseline.html
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
 
-      # SBOM (CycloneDX) for APPDIR
       - name: SBOM (Syft CycloneDX)
         uses: anchore/sbom-action@v0
         with:
@@ -146,7 +133,6 @@ jobs:
           name: sbom
           path: sbom.cdx.json
 
-      # Trivy filesystem scan of APPDIR
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
