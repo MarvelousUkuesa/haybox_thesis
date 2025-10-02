@@ -1,0 +1,43 @@
+name: PR Gate (Baseline — functional only)
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-gate-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find app directory
+        id: find
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            echo "appdir=." >> "$GITHUB_OUTPUT"
+          elif [ -f paybox-stdd-starter/package.json ]; then
+            echo "appdir=paybox-stdd-starter" >> "$GITHUB_OUTPUT"
+          else
+            echo "Could not find package.json at repo root or paybox-stdd-starter/"
+            ls -laR | sed -n '1,200p'
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ steps.find.outputs.appdir }}/package-lock.json
+
+      - name: Install deps (incl. dev)
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: npm ci --include=dev
+
+      - name: Run functional tests only
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: npm run test:functional
