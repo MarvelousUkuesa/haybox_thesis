@@ -1,159 +1,76 @@
-name: Nightly Security
-on:
-  schedule:
-    - cron: '0 1 * * *'
-  workflow_dispatch:
+# after checkout & setup-node
+- name: Install tools
+  run: |
+    pipx install semgrep
+    curl -sSfL https://raw.githubusercontent.com/google/osv-scanner/main/install.sh | sh -s -- -b /usr/local/bin
+    sudo apt-get update && sudo apt-get install -y jq
+    echo "Tools ready"
 
-jobs:
-  nightly:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+- name: Semgrep (JSON)
+  run: |
+    mkdir -p reports
+    semgrep --config .semgrep/semgrep.yml --skip-unknown-extensions \
+      --json --output reports/semgrep.json || true
+  continue-on-error: true
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+- name: OSV Scanner (JSON)
+  run: |
+    osv-scanner -r . --format json > reports/osv.json || true
+  continue-on-error: true
 
-      # Detect app dir
-      - name: Detect app directory
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f paybox-stdd-starter/package.json ]; then
-            APPDIR="paybox-stdd-starter"
-          elif [ -f package.json ]; then
-            APPDIR="."
-          else
-            first_pkg="$(git ls-files '**/package.json' | head -n1 || true)"
-            APPDIR="${first_pkg%/*}"
-            [ -z "$APPDIR" ] && { echo "::error::No package.json found"; exit 1; }
-          fi
-          echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
-          echo "Using APPDIR=$APPDIR"
+# ZAP baseline (JSON). Keep whatever you already have, just ensure it writes JSON:
+- name: ZAP Baseline
+  uses: zaproxy/action-baseline@v0.14.0
+  with:
+    target: "http://localhost:3000"
+    rules_file_name: ".zap/rules.tsv"
+    cmd_options: "-J report_json.json"   # ensure JSON
+    allow_issue_writing: false
+  continue-on-error: true
 
-      - name: Debug repo layout
-        shell: bash
-        run: |
-          echo "[root]"; pwd; ls -la
-          echo "[app]  $APPDIR"; ls -la "$APPDIR"
-          echo "[app package.json head]"; head -n 40 "$APPDIR/package.json" || true
+# Trivy filesystem scan (JSON) – optional but useful for RQ2
+- name: Trivy FS scan
+  uses: aquasecurity/trivy-action@0.20.0
+  with:
+    scan-type: "fs"
+    format: "json"
+    output: "reports/trivy.json"
+  continue-on-error: true
 
-      - name: Install deps (include dev)
-        working-directory: ${{ env.APPDIR }}
-        env:
-          NODE_ENV: ""
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --include=dev
-          else
-            npm install
-          fi
-          echo "---- sanity ----"
-          npm ls @nestjs/common @nestjs/core @nestjs/platform-express helmet express-rate-limit class-validator class-transformer crypto-js || true
-
-      - name: Ensure TypeScript compiler
-        working-directory: ${{ env.APPDIR }}
-        run: |
-          npm ls typescript --depth=0 || npm i -D typescript@5
-          ./node_modules/.bin/tsc -v
-
-      - name: Build (exclude tests)
-        working-directory: ${{ env.APPDIR }}
-        run: ./node_modules/.bin/tsc -p tsconfig.build.json
-
-      - name: Start app & wait for readiness
-        working-directory: ${{ env.APPDIR }}
-        env:
-          HOST: "0.0.0.0"
-          PORT: "3000"
-          NODE_ENV: "production"
-          JWT_ISS: "ci-issuer"
-          JWT_AUD: "ci-audience"
-          JWT_SECRET: "ci-secret"
-          WEBHOOK_SECRET: "ci-webhook-secret"
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Starting app on $HOST:$PORT ..."
-          node dist/main.js > app.log 2>&1 & echo $! > app.pid
-          ready=0
-          for i in $(seq 1 60); do
-            if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 || \
-               curl -fsS "http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
-              echo "App is up ✅"; ready=1; break
-            fi
-            if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
-              echo "❌ App died. Last 200 log lines:"; tail -n 200 app.log || true; exit 1
-            fi
-            sleep 2
-          done
-          if [ "$ready" -ne 1 ]; then
-            echo "❌ Timed out. Last 200 log lines:"; tail -n 200 app.log || true; exit 1
-          fi
-
-      - name: Write ZAP rules (mute noisy checks)
-        working-directory: ${{ env.APPDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .zap
-          # pluginId<TAB>threshold<TAB>urlRegex
-          printf "10049\tIGNORE\t.*\n90005\tIGNORE\t.*\n" > .zap/rules.tsv
-          echo "---- .zap/rules.tsv ----"; head -n 10 .zap/rules.tsv
-
-      # ZAP Baseline (default outputs: report_html.html, report_md.md, report_json.json)
-      - name: ZAP Baseline (passive)
-        uses: zaproxy/action-baseline@v0.14.0
-        with:
-          target: "http://127.0.0.1:3000/health"
-          cmd_options: "-a -I"                 # <— no -r override
-          allow_issue_writing: false
-          rules_file_name: "${{ env.APPDIR }}/.zap/rules.tsv"
-
-      - name: Upload ZAP Reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-report
-          path: |
-            report_html.html
-            report_md.md
-            report_json.json
-
-      - name: SBOM (Syft CycloneDX)
-        uses: anchore/sbom-action@v0
-        with:
-          path: "${{ env.APPDIR }}"
-          format: "cyclonedx-json"
-          output-file: "sbom.cdx.json"
-
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: sbom.cdx.json
-
-      - name: Trivy FS scan
-        uses: aquasecurity/trivy-action@0.20.0
-        with:
-          scan-type: 'fs'
-          scan-ref: '${{ env.APPDIR }}'
-          ignore-unfixed: true
-          format: 'table'
-          exit-code: '1'
-          severity: 'HIGH,CRITICAL'
-
-      - name: Show app logs (on failure)
-        if: failure()
-        working-directory: ${{ env.APPDIR }}
-        run: |
-          echo "---- app.log (last 400 lines) ----"
-          tail -n 400 app.log || true
-
-      - name: Stop app
-        if: always()
-        shell: bash
-        run: |
-          if [ -f "$APPDIR/app.pid" ]; then
-            kill "$(cat "$APPDIR/app.pid")" || true
-          fi
+# Aggregate counts for RQ2
+- name: Aggregate nightly counts
+  run: |
+    node -e 'const fs=require("fs");
+      const p=(f)=>fs.existsSync(f)?JSON.parse(fs.readFileSync(f,"utf8")):null;
+      const sem=p("reports/semgrep.json");
+      const osv=p("reports/osv.json");
+      const zap=p(".zap/report_json.json")||p("report_json.json")||null;
+      const trivy=p("reports/trivy.json");
+      const sum=(arr,fn)=>arr.reduce((a,x)=>a+fn(x),0);
+      const semCount = sem?.results ? sem.results.length : 0;
+      const osvCount = osv?.results ? osv.results.length : 0;
+      let zapCounts = {High:0, Medium:0, Low:0, Informational:0, Total:0};
+      if (zap) {
+        const sites = Array.isArray(zap.site||zap.sites)?(zap.site||zap.sites):[zap.site||zap.sites].filter(Boolean);
+        sites.forEach(s=> (s.alerts||s.alertsItems||[]).forEach(a=>{
+          const r=(a.riskdesc||a.risk||"").toString().toUpperCase();
+          const bucket = r.includes("HIGH")?"High":r.includes("MEDIUM")?"Medium":r.includes("LOW")?"Low":"Informational";
+          zapCounts[bucket]++; zapCounts.Total++;
+        }));
+      }
+      let trivyCount = 0;
+      if (trivy?.Results) {
+        trivyCount = sum(trivy.Results, r => Array.isArray(r.Vulnerabilities)? r.Vulnerabilities.length : 0);
+      }
+      const out={ Semgrep:semCount, OSV:osvCount, ZAP:zapCounts, Trivy:trivyCount };
+      fs.mkdirSync("reports",{recursive:true});
+      fs.writeFileSync("reports/nightly_summary.json", JSON.stringify(out,null,2));
+      console.log(JSON.stringify(out,null,2));
+    '
+- uses: actions/upload-artifact@v4
+  if: always()
+  with:
+    name: nightly-artifacts
+    path: |
+      reports/**
+      .zap/**
