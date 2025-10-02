@@ -1,4 +1,5 @@
 name: Release (Sign & Attest)
+
 on:
   push:
     tags: ["v*.*.*"]
@@ -9,26 +10,30 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-      packages: write
-      attestations: write
+      id-token: write # for Cosign keyless
+      packages: write # push to GHCR
+      attestations: write # publish SLSA provenance
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: "20" }
 
-      # Create lowercase repo + refs for GHCR
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Ensure GHCR path is lowercase; set common image refs
       - name: Set image vars (lowercase)
         id: vars
         run: |
           REPO_LC="${GITHUB_REPOSITORY,,}"
-          echo "repo_lc=$REPO_LC" >> "$GITHUB_OUTPUT"
-          echo "image_repo=ghcr.io/$REPO_LC" >> "$GITHUB_OUTPUT"
           echo "IMAGE_REPO=ghcr.io/$REPO_LC" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=ghcr.io/$REPO_LC:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_REF=ghcr.io/$REPO_LC:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
 
-      - run: npm ci && npm run build
+      - name: Install deps & build app
+        run: |
+          npm ci
+          npm run build
 
       - name: Build image
         run: |
@@ -40,7 +45,7 @@ jobs:
           COPY dist ./dist
           CMD ["node","dist/main.js"]
           EOF
-          docker build -t "$IMAGE_TAG" .
+          docker build -t "$IMAGE_REF" .
 
       - name: Login GHCR
         uses: docker/login-action@v3
@@ -50,62 +55,71 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image
-        run: docker push "$IMAGE_TAG"
+        run: docker push "$IMAGE_REF"
 
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      # ✅ Method 2: Use buildx imagetools with the correct template (and a fallback)
       - name: Get image digest
         id: digest
         run: |
-          DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG" --format '{{.Digest}}')
+          set -euo pipefail
+          # Primary: read digest from imagetools (.Manifest.digest)
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .Manifest}}' | jq -r '.digest')
+          # Fallback: docker manifest inspect (handles manifest list vs single)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            DIGEST=$(docker manifest inspect "$IMAGE_REF" -v | jq -r '.[0].Descriptor.digest // .Descriptor.digest')
+          fi
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "Failed to resolve digest"; exit 1
+          fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Resolved digest: $DIGEST"
-
-      - name: Prepare reports dir
-        run: mkdir -p reports
-
-      - name: Generate SBOM (CycloneDX)
-        uses: anchore/sbom-action@v0
-        with:
-          # Use immutable digest ref to avoid tag drift
-          image: ${{ steps.vars.outputs.image_repo }}@${{ steps.digest.outputs.digest }}
-          output-file: reports/sbom.cdx.json
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
+      # Sign using immutable digest reference
       - name: Sign image (keyless OIDC)
-        env: { COSIGN_EXPERIMENTAL: "1" }
+        env:
+          COSIGN_EXPERIMENTAL: "1"
         run: |
-          IMAGE_REF="${{ steps.vars.outputs.image_repo }}@${{ steps.digest.outputs.digest }}"
-          cosign sign --yes "$IMAGE_REF"
+          IMAGE_IMMUTABLE="${IMAGE_REPO}@${{ steps.digest.outputs.digest }}"
+          cosign sign --yes "$IMAGE_IMMUTABLE"
 
-      - name: Attest SBOM (cyclonedx)
-        env: { COSIGN_EXPERIMENTAL: "1" }
-        run: |
-          IMAGE_REF="${{ steps.vars.outputs.image_repo }}@${{ steps.digest.outputs.digest }}"
-          cosign attest --yes --predicate reports/sbom.cdx.json --type cyclonedx "$IMAGE_REF"
+      # SBOM for the immutable digest
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_REPO }}@${{ steps.digest.outputs.digest }}
+          output-file: sbom.cdx.json
 
-      # IMPORTANT: make sure no tagged IMAGE env leaks into this action
-      - name: Generate build provenance (SLSA)
+      # SLSA provenance: repo-only subject-name (no tag) + digest
+      - name: Generate build provenance (attestation)
         uses: actions/attest-build-provenance@v1
         env:
-          IMAGE: "" # prevent the action from reading a tagged IMAGE env
+          IMAGE: "" # prevent any tagged IMAGE env leaking in
         with:
-          subject-name: ${{ steps.vars.outputs.image_repo }} # repo only, no :tag
+          subject-name: ${{ env.IMAGE_REPO }} # e.g. ghcr.io/owner/repo
           subject-digest: ${{ steps.digest.outputs.digest }} # sha256:...
           push-to-registry: true
 
-      - name: Write M5 checklist
+      - name: Prepare artifact dirs
         run: |
-          node -e 'require("fs").writeFileSync("reports/m5_evidence.json", JSON.stringify({
-            release_tag: process.env.GITHUB_REF_NAME || "unknown",
-            sbom_attached: true,
-            image_signed: true,
-            provenance_attested: true
-          }, null, 2))'
+          mkdir -p .zap || true
+          mkdir -p reports || true
 
       - name: Upload evidence bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: evidence-bundle
-          path: reports/**
+          path: |
+            sbom.cdx.json
+            .zap/*
+            reports/*
