@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1) Detect where your Node app actually is
+      # 1) Detect Node app path (your current helper)
       - name: Find app directory
         id: find
         shell: bash
@@ -30,28 +30,21 @@ jobs:
             ls -laR | sed -n '1,200p'
             exit 1
           fi
-          echo "Using appdir set in GITHUB_OUTPUT"
 
       - name: Debug layout
-        shell: bash
         run: |
-          echo "Repo root:"
-          pwd
-          ls -la
-          echo "App dir:"
-          cd "${{ steps.find.outputs.appdir }}"
-          pwd
-          ls -la
+          echo "Repo root:"; pwd; ls -la
+          echo "App dir:"; cd "${{ steps.find.outputs.appdir }}"; pwd; ls -la
 
-      # 2) Setup Node + cache using the discovered lockfile
+      # 2) Node + cache
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
           cache-dependency-path: ${{ steps.find.outputs.appdir }}/package-lock.json
 
-      # 3) Install dev deps (Jest lives in devDependencies)
-      - name: Install deps
+      # 3) Install
+      - name: Install deps (incl. dev)
         working-directory: ${{ steps.find.outputs.appdir }}
         run: npm ci --include=dev
 
@@ -59,18 +52,22 @@ jobs:
         working-directory: ${{ steps.find.outputs.appdir }}
         run: npx jest --version
 
-      # 4) Run the full security test pack
-      - name: Run tests
+      # 4) Tests: functional FIRST, then security pack
+      - name: Run functional tests
+        working-directory: ${{ steps.find.outputs.appdir }}
+        run: npm run test:functional
+
+      - name: Run security RAT tests
         working-directory: ${{ steps.find.outputs.appdir }}
         run: npm run test:sec
 
-      # 5) Semgrep (config path resolves for root or subdir)
+      # 5) Semgrep
       - name: Semgrep (curated)
         uses: returntocorp/semgrep-action@v1
         with:
           config: ${{ steps.find.outputs.appdir }}/.semgrep/semgrep.yml
 
-      # 6) Gitleaks (needs GITHUB_TOKEN on PRs)
+      # 6) Gitleaks
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -83,7 +80,7 @@ jobs:
             --redact
             --config=${{ steps.find.outputs.appdir }}/.gitleaks.toml
 
-  # OSV v2 runs as a reusable workflow (not a step)
+  # 7) OSV v2 (keep as-is)
   osv-scan:
     needs: pr-gate
     permissions:
