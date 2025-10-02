@@ -44,9 +44,8 @@ export function assertAlgAllowed(
 ): void {
   if (!header.alg) throw new Error("Missing alg");
   if (header.alg === "none") throw new Error("Disallow alg=none");
-  if (!allowed.includes(header.alg as any)) {
+  if (!allowed.includes(header.alg as any))
     throw new Error(`Algorithm not allowed: ${header.alg}`);
-  }
 }
 
 export function assertRegisteredClaims(
