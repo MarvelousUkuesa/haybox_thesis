@@ -1,16 +1,15 @@
-import { IsInt, Min, IsString, Length, Matches } from 'class-validator';
+import { IsInt, IsString } from "class-validator";
 
 export class CreateIntentDto {
+  // 🔴 SEED: accept 0/negative/huge amounts
   @IsInt()
-  @Min(1)
   amount!: number;
 
+  // 🔴 SEED: accept any string (e.g., "$", "{", "usd", "US1", "AAAA")
   @IsString()
-  @Length(3,3)
-  @Matches(/^[A-Z]{3}$/)
   currency!: string;
 
+  // 🔴 SEED: allow empty/short keys
   @IsString()
-  @Length(8,64)
   idempotencyKey!: string;
 }
