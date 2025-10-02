@@ -1,44 +1,51 @@
 name: Release (Sign & Attest)
+
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch: {}
 
 jobs:
   build-sign:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
-      attestations: write
-      packages: write
+      id-token: write          # for Cosign keyless
+      packages: write          # push to GHCR
+      attestations: write      # publish SLSA provenance
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # Ensure GHCR repo path is lowercase and set common image refs
+      # Ensure GHCR path is lowercase; set common image refs
       - name: Set image vars (lowercase)
         id: vars
         run: |
           REPO_LC="${GITHUB_REPOSITORY,,}"
-          echo "repo_lc=$REPO_LC" >> "$GITHUB_OUTPUT"
           echo "IMAGE_REPO=ghcr.io/$REPO_LC" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=ghcr.io/$REPO_LC:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_REF=ghcr.io/$REPO_LC:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
 
-      - run: npm ci && npm run build
+      - name: Install deps & build app
+        run: |
+          npm ci
+          npm run build
 
       - name: Build image
         run: |
-          printf '%s\n' \
-            'FROM node:20-alpine' \
-            'WORKDIR /app' \
-            'COPY package*.json ./' \
-            'RUN npm ci --omit=dev' \
-            'COPY dist ./dist' \
-            'CMD ["node","dist/main.js"]' > Dockerfile
-          docker build -t "$IMAGE_TAG" .
+          cat > Dockerfile <<'EOF'
+          FROM node:20-alpine
+          WORKDIR /app
+          COPY package*.json ./
+          RUN npm ci --omit=dev
+          COPY dist ./dist
+          CMD ["node","dist/main.js"]
+          EOF
+          docker build -t "$IMAGE_REF" .
 
       - name: Login GHCR
         uses: docker/login-action@v3
@@ -48,22 +55,19 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image
-        run: docker push "$IMAGE_TAG"
+        run: docker push "$IMAGE_REF"
 
-      - name: Ensure jq is available
-        run: |
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y jq
-          fi
-
+      # ✅ Robust digest resolution: pull and read RepoDigests (no buildx templating)
       - name: Get image digest
         id: digest
         run: |
           set -euo pipefail
-          DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG" --format '{{json .Manifest}}' | jq -r '.digest')
-          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            DIGEST=$(docker manifest inspect "$IMAGE_TAG" -v | jq -r '.[0].Descriptor.digest // .Descriptor.digest')
+          docker pull "$IMAGE_REF" >/dev/null
+          REF=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_REF")
+          echo "Resolved reference: $REF"
+          DIGEST="${REF#*@}"
+          if [ -z "$DIGEST" ]; then
+            echo "Failed to resolve digest"; exit 1
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Resolved digest: $DIGEST"
@@ -71,29 +75,32 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
+      # Sign using immutable digest reference
       - name: Sign image (keyless OIDC)
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          IMAGE_REF="${IMAGE_REPO}@${{ steps.digest.outputs.digest }}"
-          cosign sign --yes "$IMAGE_REF"
+          IMAGE_IMMUTABLE="${IMAGE_REPO}@${{ steps.digest.outputs.digest }}"
+          cosign sign --yes "$IMAGE_IMMUTABLE"
 
+      # SBOM for the immutable digest
       - name: Generate SBOM (CycloneDX)
         uses: anchore/sbom-action@v0
         with:
           image: ${{ env.IMAGE_REPO }}@${{ steps.digest.outputs.digest }}
           output-file: sbom.cdx.json
 
+      # SLSA provenance: repo-only subject-name (no tag) + digest
       - name: Generate build provenance (attestation)
         uses: actions/attest-build-provenance@v1
         env:
-          IMAGE: ""   # prevent leaking a tagged IMAGE env
+          IMAGE: ""   # prevent any tagged IMAGE env leaking in
         with:
-          subject-name: ${{ env.IMAGE_REPO }}                  # repo only, no tag
+          subject-name: ${{ env.IMAGE_REPO }}                  # e.g. ghcr.io/owner/repo
           subject-digest: ${{ steps.digest.outputs.digest }}   # sha256:...
           push-to-registry: true
 
-      - name: Prepare artifact dirs (optional)
+      - name: Prepare artifact dirs
         run: |
           mkdir -p .zap || true
           mkdir -p reports || true
