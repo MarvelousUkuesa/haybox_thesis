@@ -1,0 +1,9 @@
+{
+  "ts_code_lines": 201,
+  "kloc": 0.201,
+  "confirmed_tool_TPs": 0,
+  "confirmed_seeded": 5,
+  "total_confirmed": 5,
+  "m1_defects_per_kloc": 24.876,
+  "notes": "LOC from cloc on src/, counting TypeScript code lines only; defects = TP tool findings + unique seeded faults."
+}

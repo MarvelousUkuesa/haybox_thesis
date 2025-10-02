@@ -1,0 +1,6 @@
+{
+  "release_tag": "vX.Y.Z",
+  "sbom_attached": true,
+  "image_signed": true,
+  "provenance_attested": true
+}

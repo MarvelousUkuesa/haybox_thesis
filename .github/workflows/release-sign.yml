@@ -1,48 +1,113 @@
 name: Release (Sign & Attest)
+
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["v*.*.*"] # e.g., v0.1.2
+  workflow_dispatch: {}
+
 jobs:
   build-sign:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
-      attestations: write
-      packages: write
+      id-token: write # required for keyless cosign
+      packages: write # push to GHCR
+      attestations: write # provenance action
+
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '20' }
-      - run: npm ci && npm run build
-      - name: Build image
+
+      - name: Normalize image ref (lowercase)
+        id: img
+        shell: bash
         run: |
-          echo "FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --omit=dev\nCOPY dist ./dist\nCMD [\"node\", \"dist/main.js\"]" > Dockerfile
-          docker build -t ghcr.io/${{ github.repository }}:${{ github.ref_name }} .
+          REF="ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
+          REF_LC=$(echo "$REF" | tr '[:upper:]' '[:lower:]')
+          # If you ever hit underscore issues with your registry, uncomment:
+          # REF_LC=$(echo "$REF_LC" | sed 's/_/-/g')
+          echo "image=$REF_LC" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=$REF_LC" >> "$GITHUB_ENV"
+          echo "Using IMAGE=$REF_LC"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build app (tsc over src only)
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build image (inline Dockerfile)
+        run: |
+          cat > Dockerfile <<'EOF'
+          FROM node:20-alpine
+          WORKDIR /app
+          COPY package*.json ./
+          RUN npm ci --omit=dev
+          COPY dist ./dist
+          CMD ["node","dist/main.js"]
+          EOF
+          docker build -t "$IMAGE" .
+
       - name: Login GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push image
-        run: docker push ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+        run: docker push "$IMAGE"
+
+      - name: Get image digest
+        id: digest
+        run: |
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE" | sed 's/.*@//')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Resolved digest: $DIGEST"
+
+      - name: Generate SBOM (CycloneDX via Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.img.outputs.image }}
+          output-file: reports/sbom.cdx.json
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
+
       - name: Sign image (keyless OIDC)
-        run: cosign sign ghcr.io/${{ github.repository }}:${{ github.ref_name }} --yes
-      - name: Generate build provenance (attestation)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: cosign sign --yes "$IMAGE"
+
+      # Optional but recommended: attach the SBOM as an attestation
+      - name: Attest SBOM to image (cyclonedx)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: cosign attest --yes --predicate reports/sbom.cdx.json --type cyclonedx "$IMAGE"
+
+      - name: Generate build provenance (SLSA)
         uses: actions/attest-build-provenance@v1
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ${{ steps.img.outputs.image }}
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
+
+      - name: Write M5 checklist
+        run: |
+          mkdir -p reports
+          node -e 'require("fs").writeFileSync("reports/m5_evidence.json", JSON.stringify({
+            release_tag: process.env.GITHUB_REF_NAME || "unknown",
+            sbom_attached: true,
+            image_signed: true,
+            provenance_attested: true
+          }, null, 2))'
+
       - name: Upload evidence bundle
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: evidence-bundle
           path: |
-            sbom.cdx.json
-            .zap/*
-            reports/*
-        if: always()
+            reports/**
