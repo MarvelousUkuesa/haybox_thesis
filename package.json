@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "jest --runInBand",
     "test:functional": "jest --runInBand --testPathIgnorePatterns='(idor|security-headers|webhook|ssrf|jwt-verification|property-dto)\\.spec\\.ts'",
-    "test:security": "jest --runInBand test/integration/idor.spec.ts test/integration/security-headers.spec.ts test/integration/webhook.spec.ts test/integration/ssrf.spec.ts test/unit/jwt-verification.spec.ts test/bdd/property-dto.spec.ts",
+    "test:security": "jest --runInBand test/integration/idor.spec.ts test/integration/security-headers.spec.ts test/integration/webhook.spec.ts test/integration/ssrf.spec.ts test/unit/jwt-verification.spec.ts test/unit/password.spec.ts  test/bdd/property-dto.spec.ts",
     "test:sec": "npm run test:security",
     "test:unit": "jest --runInBand --testPathPattern=unit",
     "test:int": "jest --runInBand --testPathPattern=integration",

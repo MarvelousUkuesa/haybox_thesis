@@ -1,3 +1,6 @@
 fault_id,cycle,introduced_sha,introduced_ts,fixed_sha,fixed_ts,test_name,category,notes
 C1-BOLA,1,c8c79c3297862f30cf7331d8a17577136ae4e6ae,2025-10-02T10:33:13Z,,,test/integration/idor.spec.ts,authz,'allow empty role (no x-role header)'
 C2-JWT,2,c8c79c3297862f30cf7331d8a17577136ae4e6ae,2025-10-02T10:33:13Z,d4f9444af6ca92e94b9992f51b08bbcbe466cf00,2025-10-02T11:08:26Z,test/unit/jwt-verification.spec.ts,authn,'fixed: restore JWT checks'
+C3-SSRF,3,d75341de03f82a995026a9bbaa6d2fee8a841ea7,2025-10-02T11:22:20Z,,,test/integration/ssrf.spec.ts,ssrf,'policy off'
+C4-PWHASH,4,2f4ecdb7accea8d73a6f93135253acdb283c886f,2025-10-02T11:28:11Z,,,test/unit/password.spec.ts,crypto,'cost<12'
+C5-DTO,5,51e8eb1d486b627719207506b5edf7d76bea40fa,2025-10-02T11:47:29Z,,,test/bdd/property-dto.spec.ts,validation,'relaxed DTO decorators so bad inputs pass'
