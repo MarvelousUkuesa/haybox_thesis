@@ -23,17 +23,10 @@ async function bootstrap() {
 
   // --- Rate limiting & validation ---
   app.use(rateLimit({ windowMs: 60_000, max: 60 }));
-  // app.useGlobalPipes(
-  //   new ValidationPipe({
-  //     whitelist: true,
-  //     forbidNonWhitelisted: true,
-  //     transform: true,
-  //   })
-  // );
   app.useGlobalPipes(
     new ValidationPipe({
-      whitelist: false, // 🔴 SEED: was true
-      forbidNonWhitelisted: false, // 🔴 SEED: was true
+      whitelist: true,
+      forbidNonWhitelisted: true,
       transform: true,
     })
   );
