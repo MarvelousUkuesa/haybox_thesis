@@ -57,16 +57,25 @@ jobs:
       - name: Push image
         run: docker push "$IMAGE_REF"
 
-      # ✅ Robust digest resolution: pull and read RepoDigests (no buildx templating)
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      # ✅ Method 2: Use buildx imagetools with the correct template (and a fallback)
       - name: Get image digest
         id: digest
         run: |
           set -euo pipefail
-          docker pull "$IMAGE_REF" >/dev/null
-          REF=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_REF")
-          echo "Resolved reference: $REF"
-          DIGEST="${REF#*@}"
-          if [ -z "$DIGEST" ]; then
+          # Primary: read digest from imagetools (.Manifest.digest)
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .Manifest}}' | jq -r '.digest')
+          # Fallback: docker manifest inspect (handles manifest list vs single)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            DIGEST=$(docker manifest inspect "$IMAGE_REF" -v | jq -r '.[0].Descriptor.digest // .Descriptor.digest')
+          fi
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
             echo "Failed to resolve digest"; exit 1
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
