@@ -1,4 +1,4 @@
-import { IsInt, Min, IsString, Length, Matches } from 'class-validator';
+import { IsInt, Min, IsString, Length, Matches } from "class-validator";
 
 export class CreateIntentDto {
   @IsInt()
@@ -6,11 +6,11 @@ export class CreateIntentDto {
   amount!: number;
 
   @IsString()
-  @Length(3,3)
+  @Length(3, 3)
   @Matches(/^[A-Z]{3}$/)
   currency!: string;
 
   @IsString()
-  @Length(8,64)
+  @Length(8, 64)
   idempotencyKey!: string;
 }
