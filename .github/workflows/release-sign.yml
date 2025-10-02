@@ -1,8 +1,7 @@
 name: Release (Sign & Attest)
-
 on:
   push:
-    tags: ["v*.*.*"] # e.g., v0.1.2
+    tags: ["v*.*.*"]
   workflow_dispatch: {}
 
 jobs:
@@ -10,35 +9,28 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # required for keyless cosign
-      packages: write # push to GHCR
-      attestations: write # provenance action
+      id-token: write
+      packages: write
+      attestations: write
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Normalize image ref (lowercase)
-        id: img
-        shell: bash
-        run: |
-          REF="ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
-          REF_LC=$(echo "$REF" | tr '[:upper:]' '[:lower:]')
-          # If you ever hit underscore issues with your registry, uncomment:
-          # REF_LC=$(echo "$REF_LC" | sed 's/_/-/g')
-          echo "image=$REF_LC" >> "$GITHUB_OUTPUT"
-          echo "IMAGE=$REF_LC" >> "$GITHUB_ENV"
-          echo "Using IMAGE=$REF_LC"
-
       - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+        with: { node-version: "20" }
 
-      - name: Build app (tsc over src only)
+      # Create lowercase repo + refs for GHCR
+      - name: Set image vars (lowercase)
+        id: vars
         run: |
-          npm ci
-          npm run build
+          REPO_LC="${GITHUB_REPOSITORY,,}"
+          echo "repo_lc=$REPO_LC" >> "$GITHUB_OUTPUT"
+          echo "image_repo=ghcr.io/$REPO_LC" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_REPO=ghcr.io/$REPO_LC" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=ghcr.io/$REPO_LC:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
 
-      - name: Build image (inline Dockerfile)
+      - run: npm ci && npm run build
+
+      - name: Build image
         run: |
           cat > Dockerfile <<'EOF'
           FROM node:20-alpine
@@ -48,7 +40,7 @@ jobs:
           COPY dist ./dist
           CMD ["node","dist/main.js"]
           EOF
-          docker build -t "$IMAGE" .
+          docker build -t "$IMAGE_TAG" .
 
       - name: Login GHCR
         uses: docker/login-action@v3
@@ -58,45 +50,52 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image
-        run: docker push "$IMAGE"
+        run: docker push "$IMAGE_TAG"
 
       - name: Get image digest
         id: digest
         run: |
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE" | sed 's/.*@//')
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG" --format '{{.Digest}}')
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Resolved digest: $DIGEST"
 
-      - name: Generate SBOM (CycloneDX via Syft)
+      - name: Prepare reports dir
+        run: mkdir -p reports
+
+      - name: Generate SBOM (CycloneDX)
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ steps.img.outputs.image }}
+          # Use immutable digest ref to avoid tag drift
+          image: ${{ steps.vars.outputs.image_repo }}@${{ steps.digest.outputs.digest }}
           output-file: reports/sbom.cdx.json
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign image (keyless OIDC)
-        env:
-          COSIGN_EXPERIMENTAL: "1"
-        run: cosign sign --yes "$IMAGE"
+        env: { COSIGN_EXPERIMENTAL: "1" }
+        run: |
+          IMAGE_REF="${{ steps.vars.outputs.image_repo }}@${{ steps.digest.outputs.digest }}"
+          cosign sign --yes "$IMAGE_REF"
 
-      # Optional but recommended: attach the SBOM as an attestation
-      - name: Attest SBOM to image (cyclonedx)
-        env:
-          COSIGN_EXPERIMENTAL: "1"
-        run: cosign attest --yes --predicate reports/sbom.cdx.json --type cyclonedx "$IMAGE"
+      - name: Attest SBOM (cyclonedx)
+        env: { COSIGN_EXPERIMENTAL: "1" }
+        run: |
+          IMAGE_REF="${{ steps.vars.outputs.image_repo }}@${{ steps.digest.outputs.digest }}"
+          cosign attest --yes --predicate reports/sbom.cdx.json --type cyclonedx "$IMAGE_REF"
 
+      # IMPORTANT: make sure no tagged IMAGE env leaks into this action
       - name: Generate build provenance (SLSA)
         uses: actions/attest-build-provenance@v1
+        env:
+          IMAGE: "" # prevent the action from reading a tagged IMAGE env
         with:
-          subject-name: ${{ steps.img.outputs.image }}
-          subject-digest: ${{ steps.digest.outputs.digest }}
+          subject-name: ${{ steps.vars.outputs.image_repo }} # repo only, no :tag
+          subject-digest: ${{ steps.digest.outputs.digest }} # sha256:...
           push-to-registry: true
 
       - name: Write M5 checklist
         run: |
-          mkdir -p reports
           node -e 'require("fs").writeFileSync("reports/m5_evidence.json", JSON.stringify({
             release_tag: process.env.GITHUB_REF_NAME || "unknown",
             sbom_attached: true,
@@ -109,5 +108,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: evidence-bundle
-          path: |
-            reports/**
+          path: reports/**

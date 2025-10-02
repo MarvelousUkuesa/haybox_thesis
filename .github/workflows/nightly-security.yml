@@ -1,7 +1,7 @@
 name: Nightly Security
 on:
   schedule:
-    - cron: '0 1 * * *'
+    - cron: "0 1 * * *"
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       # Detect app dir
       - name: Detect app directory
@@ -107,7 +107,7 @@ jobs:
         uses: zaproxy/action-baseline@v0.14.0
         with:
           target: "http://127.0.0.1:3000/health"
-          cmd_options: "-a -I"                 # <— no -r override
+          cmd_options: "-a -I" # <— no -r override
           allow_issue_writing: false
           rules_file_name: "${{ env.APPDIR }}/.zap/rules.tsv"
 
@@ -136,12 +136,12 @@ jobs:
       - name: Trivy FS scan
         uses: aquasecurity/trivy-action@0.20.0
         with:
-          scan-type: 'fs'
-          scan-ref: '${{ env.APPDIR }}'
+          scan-type: "fs"
+          scan-ref: "${{ env.APPDIR }}"
           ignore-unfixed: true
-          format: 'table'
-          exit-code: '1'
-          severity: 'HIGH,CRITICAL'
+          format: "table"
+          exit-code: "1"
+          severity: "HIGH,CRITICAL"
 
       - name: Show app logs (on failure)
         if: failure()
