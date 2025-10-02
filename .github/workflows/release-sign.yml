@@ -2,6 +2,7 @@ name: Release (Sign & Attest)
 on:
   push:
     tags: ["v*.*.*"]
+
 jobs:
   build-sign:
     runs-on: ubuntu-latest
@@ -10,34 +11,95 @@ jobs:
       contents: read
       attestations: write
       packages: write
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with:
+          node-version: '20'
+
+      # Ensure GHCR repo path is lowercase and set common image refs
+      - name: Set image vars (lowercase)
+        id: vars
+        run: |
+          REPO_LC="${GITHUB_REPOSITORY,,}"
+          echo "repo_lc=$REPO_LC" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_REPO=ghcr.io/$REPO_LC" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=ghcr.io/$REPO_LC:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+
       - run: npm ci && npm run build
+
       - name: Build image
         run: |
-          echo "FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --omit=dev\nCOPY dist ./dist\nCMD [\"node\", \"dist/main.js\"]" > Dockerfile
-          docker build -t ghcr.io/${{ github.repository }}:${{ github.ref_name }} .
+          printf '%s\n' \
+            'FROM node:20-alpine' \
+            'WORKDIR /app' \
+            'COPY package*.json ./' \
+            'RUN npm ci --omit=dev' \
+            'COPY dist ./dist' \
+            'CMD ["node","dist/main.js"]' > Dockerfile
+          docker build -t "$IMAGE_TAG" .
+
       - name: Login GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push image
-        run: docker push ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+        run: docker push "$IMAGE_TAG"
+
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      - name: Get image digest
+        id: digest
+        run: |
+          set -euo pipefail
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG" --format '{{json .Manifest}}' | jq -r '.digest')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            DIGEST=$(docker manifest inspect "$IMAGE_TAG" -v | jq -r '.[0].Descriptor.digest // .Descriptor.digest')
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Resolved digest: $DIGEST"
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
+
       - name: Sign image (keyless OIDC)
-        run: cosign sign ghcr.io/${{ github.repository }}:${{ github.ref_name }} --yes
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          IMAGE_REF="${IMAGE_REPO}@${{ steps.digest.outputs.digest }}"
+          cosign sign --yes "$IMAGE_REF"
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_REPO }}@${{ steps.digest.outputs.digest }}
+          output-file: sbom.cdx.json
+
       - name: Generate build provenance (attestation)
         uses: actions/attest-build-provenance@v1
+        env:
+          IMAGE: ""   # prevent leaking a tagged IMAGE env
         with:
-          subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.digest.outputs.digest }}
+          subject-name: ${{ env.IMAGE_REPO }}                  # repo only, no tag
+          subject-digest: ${{ steps.digest.outputs.digest }}   # sha256:...
           push-to-registry: true
+
+      - name: Prepare artifact dirs (optional)
+        run: |
+          mkdir -p .zap || true
+          mkdir -p reports || true
+
       - name: Upload evidence bundle
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: evidence-bundle
@@ -45,4 +107,3 @@ jobs:
             sbom.cdx.json
             .zap/*
             reports/*
-        if: always()
