@@ -1,1 +1,2 @@
 fault_id,cycle,introduced_sha,introduced_ts,fixed_sha,fixed_ts,test_name,category,notes
+C1-BOLA,1,c8c79c3297862f30cf7331d8a17577136ae4e6ae,2025-10-02T10:33:13Z,,,test/integration/idor.spec.ts,authz,'allow empty role (no x-role header)'
